@@ -102,7 +102,14 @@ class DailyAssetChart(QWidget):
         plot_w = max(1, right - left)
         plot_h = max(1, bottom - top)
 
-        display_data = [self._row_with_visible_total(row) for row in display_data]
+        display_data = [
+            row for row in (self._row_with_visible_total(row) for row in display_data)
+            if self._row_has_visible_value(row)
+        ]
+        if not display_data:
+            painter.setPen(QColor("#93a4b7"))
+            painter.drawText(rect, Qt.AlignCenter, "目前選取範圍沒有可顯示的資產資料")
+            return
         series_defs = self._series_defs()
         all_values = [
             float(item.get(key, 0.0) or 0.0)
@@ -224,6 +231,12 @@ class DailyAssetChart(QWidget):
         copied = dict(row)
         copied["visible_total_value_twd"] = total
         return copied
+
+    def _row_has_visible_value(self, row):
+        for key, _label, _color in self._series_defs():
+            if float(row.get(key, 0.0) or 0.0) > 0:
+                return True
+        return False
 
     def _limit_rows(self, rows, scale):
         if not rows:

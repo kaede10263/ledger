@@ -410,7 +410,15 @@ class PortfolioManager:
         first_tx_date = min(self._normalize_tx_date(t.date).date() for t in self.transactions)
         today = datetime.now().date()
         schema_version = self.db_manager.get_setting("daily_asset_snapshots_version")
-        existing = set() if schema_version != "2" else set(self.db_manager.load_daily_asset_snapshot_dates())
+        existing_snapshots = self.db_manager.load_daily_asset_snapshots()
+        existing = set(self.db_manager.load_daily_asset_snapshot_dates())
+        invalid_dates = {
+            date_type.fromisoformat(row["date"])
+            for row in existing_snapshots
+            if float(row.get("total_value_twd", 0.0) or 0.0) <= 0.0
+        }
+        if schema_version != "3":
+            existing -= invalid_dates
         missing_dates = [
             first_tx_date + timedelta(days=i)
             for i in range((today - first_tx_date).days + 1)
@@ -439,7 +447,7 @@ class PortfolioManager:
                 values["crypto_value_twd"],
                 values["metal_value_twd"],
             )
-        self.db_manager.set_setting("daily_asset_snapshots_version", "2")
+        self.db_manager.set_setting("daily_asset_snapshots_version", "3")
 
     def _calculate_snapshot_values(
         self,
@@ -468,7 +476,7 @@ class PortfolioManager:
                 continue
             price = self._get_snapshot_price(asset, snapshot_date, price_cache)
             if price is None:
-                price = asset.current_price or 0.0
+                price = self._get_current_price_fallback(asset) or asset.current_price or 0.0
             value = asset.quantity * price
             value_currency = "USD" if asset.asset_type in [AssetType.METAL, AssetType.CRYPTO] else self._get_asset_currency(asset)
             value_twd = self._convert_to_twd_on_date(value, value_currency, snapshot_date, fx_cache)
@@ -524,6 +532,10 @@ class PortfolioManager:
         cache_key = (asset.symbol, asset.asset_type, snapshot_date)
         if cache_key in price_cache:
             return price_cache[cache_key]
+        unavailable_key = (asset.symbol, asset.asset_type, "__unavailable_after__")
+        unavailable_after = price_cache.get(unavailable_key)
+        if unavailable_after is not None and snapshot_date >= unavailable_after:
+            return None
 
         price = None
         try:
@@ -541,8 +553,18 @@ class PortfolioManager:
         except Exception:
             price = None
 
+        if price is None:
+            price_cache[unavailable_key] = snapshot_date
         price_cache[cache_key] = price
         return price
+
+    def _get_current_price_fallback(self, asset: Asset) -> Optional[float]:
+        """歷史價缺漏時，使用已更新的目前價格避免快照被寫成 0。"""
+        key = f"{asset.symbol}_{asset.asset_type.value}"
+        current_asset = self.assets.get(key)
+        if current_asset and current_asset.current_price and current_asset.current_price > 0:
+            return float(current_asset.current_price)
+        return None
 
     def _get_yahoo_daily_close(self, yahoo_symbol: str, snapshot_date: date_type) -> Optional[float]:
         """抓指定日期或最近前一個交易日的日收盤價。"""
