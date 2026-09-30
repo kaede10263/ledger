@@ -1,5 +1,6 @@
 """主視窗"""
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 import sys
 
@@ -9,10 +10,10 @@ from PySide6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QDateEdit, QTextEdit, QLabel, QMessageBox,
     QHeaderView, QGroupBox, QTreeWidget, QTreeWidgetItem, QScrollArea,
     QFrame, QGridLayout, QListWidget, QListWidgetItem, QTabWidget, QMenu,
-    QCheckBox, QAbstractItemView
+    QCheckBox, QAbstractItemView, QButtonGroup
 )
 from PySide6.QtCore import Qt, QDate, QTimer, QPoint, QObject, Signal, QThread
-from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen, QAction, QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPen, QAction, QKeySequence, QShortcut
 from shiboken6 import isValid
 
 from portfolio_manager import PortfolioManager
@@ -49,10 +50,17 @@ class DailyAssetChart(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._data = []
+        self._scale = "day"
         self.setMinimumHeight(360)
 
-    def set_data(self, data):
+    def set_data(self, data, scale=None):
         self._data = data or []
+        if scale is not None:
+            self._scale = scale
+        self.update()
+
+    def set_scale(self, scale):
+        self._scale = scale
         self.update()
 
     def paintEvent(self, event):
@@ -60,11 +68,15 @@ class DailyAssetChart(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect().adjusted(18, 18, -18, -18)
-        painter.fillRect(rect, QColor("#ffffff"))
+        painter.fillRect(rect, QColor("#151a21"))
 
         if not self._data:
-            painter.setPen(QColor("#6b7c8f"))
+            painter.setPen(QColor("#93a4b7"))
             painter.drawText(rect, Qt.AlignCenter, "更新價格後會建立每日資產快照")
+            return
+
+        display_data = self._aggregate_data(self._data, self._scale)
+        if not display_data:
             return
 
         left = rect.left() + 72
@@ -75,13 +87,13 @@ class DailyAssetChart(QWidget):
         plot_h = max(1, bottom - top)
 
         series_defs = [
-            ("total_value_twd", "總資產", QColor("#1f5f99")),
-            ("tw_stock_value_twd", "台股", QColor("#0f7b59")),
-            ("us_stock_value_twd", "美股", QColor("#b35c00")),
+            ("total_value_twd", "總資產", QColor("#58d6a3")),
+            ("tw_stock_value_twd", "台股", QColor("#f0b84a")),
+            ("us_stock_value_twd", "美股", QColor("#cb7cff")),
         ]
         all_values = [
             float(item.get(key, 0.0) or 0.0)
-            for item in self._data
+            for item in display_data
             for key, _label, _color in series_defs
         ]
         max_v = max(all_values) if all_values else 0.0
@@ -89,20 +101,20 @@ class DailyAssetChart(QWidget):
         if max_v <= min_v:
             max_v = min_v + 1.0
 
-        painter.setPen(QPen(QColor("#d8e0ea"), 1))
+        painter.setPen(QPen(QColor("#2a313b"), 1))
         for i in range(5):
             y = top + (plot_h * i / 4)
             painter.drawLine(left, int(y), right, int(y))
             value = max_v - ((max_v - min_v) * i / 4)
-            painter.setPen(QColor("#6b7c8f"))
+            painter.setPen(QColor("#93a4b7"))
             painter.drawText(rect.left(), int(y) - 8, 64, 18, Qt.AlignRight, self._format_money(value))
-            painter.setPen(QPen(QColor("#d8e0ea"), 1))
+            painter.setPen(QPen(QColor("#2a313b"), 1))
 
-        painter.setPen(QPen(QColor("#9fb3c8"), 1))
+        painter.setPen(QPen(QColor("#3a4452"), 1))
         painter.drawLine(left, bottom, right, bottom)
         painter.drawLine(left, top, left, bottom)
 
-        count = len(self._data)
+        count = len(display_data)
 
         def point_at(row_index, value):
             x = left if count == 1 else left + (plot_w * row_index / (count - 1))
@@ -112,15 +124,15 @@ class DailyAssetChart(QWidget):
         for key, label, color in series_defs:
             painter.setPen(QPen(color, 2))
             last = None
-            for i, item in enumerate(self._data):
+            for i, item in enumerate(display_data):
                 pt = point_at(i, item.get(key, 0.0))
                 if last is not None:
                     painter.drawLine(last[0], last[1], pt[0], pt[1])
                 last = pt
 
-        painter.setPen(QColor("#506070"))
-        first_date = str(self._data[0].get("date", ""))
-        last_date = str(self._data[-1].get("date", ""))
+        painter.setPen(QColor("#93a4b7"))
+        first_date = str(display_data[0].get("date", ""))
+        last_date = str(display_data[-1].get("date", ""))
         painter.drawText(left, bottom + 20, 120, 20, Qt.AlignLeft, first_date)
         painter.drawText(right - 120, bottom + 20, 120, 20, Qt.AlignRight, last_date)
 
@@ -129,9 +141,39 @@ class DailyAssetChart(QWidget):
         for _key, label, color in series_defs:
             painter.setPen(QPen(color, 3))
             painter.drawLine(legend_x, legend_y + 8, legend_x + 20, legend_y + 8)
-            painter.setPen(QColor("#324457"))
+            painter.setPen(QColor("#d5dee9"))
             painter.drawText(legend_x + 26, legend_y, 70, 18, Qt.AlignLeft, label)
             legend_x += 92
+
+    def _aggregate_data(self, rows, scale):
+        if scale == "day":
+            return rows
+        grouped = {}
+        order = []
+        for row in rows:
+            try:
+                dt = datetime.fromisoformat(str(row.get("date"))).date()
+            except Exception:
+                continue
+            key = self._bucket_key(dt, scale)
+            if key not in grouped:
+                order.append(key)
+            grouped[key] = row
+        return [grouped[key] for key in order]
+
+    def _bucket_key(self, dt, scale):
+        if scale == "week":
+            iso = dt.isocalendar()
+            return (iso.year, iso.week)
+        if scale == "month":
+            return (dt.year, dt.month)
+        if scale == "quarter":
+            return (dt.year, (dt.month - 1) // 3)
+        if scale == "half":
+            return (dt.year, 0 if dt.month <= 6 else 1)
+        if scale == "year":
+            return (dt.year,)
+        return dt.isoformat()
 
     def _format_money(self, value):
         abs_v = abs(value)
@@ -516,6 +558,10 @@ class MainWindow(QMainWindow):
         self.portfolio_manager = PortfolioManager()
         self.setWindowTitle("Personal Portfolio Dashboard")
         self.setMinimumSize(1200, 800)
+        icon_path = Path(__file__).resolve().parent.parent / "assets" / "golden_ui_icon.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+        self._history_scale = "day"
         # 儲存每個資產類型的排序設定
         self.sort_settings = {
             asset_type: {'key': 'value', 'order': 'desc'}
@@ -805,35 +851,87 @@ class MainWindow(QMainWindow):
         chart_shell.setObjectName("chartShell")
         chart_shell.setStyleSheet("""
             QFrame#chartShell {
-                background: #ffffff;
-                border: 1px dashed #9fb3c8;
+                background: #151a21;
+                border: 1px solid #2a313b;
                 border-radius: 8px;
             }
         """)
         chart_layout = QVBoxLayout()
-        chart_layout.setContentsMargins(24, 24, 24, 24)
+        chart_layout.setContentsMargins(18, 14, 18, 18)
         chart_layout.setSpacing(10)
         chart_shell.setLayout(chart_layout)
 
+        chart_top_layout = QHBoxLayout()
+        chart_top_layout.setSpacing(10)
+
         self.history_total_label = QLabel("目前總資產：NT$ 0.00")
         total_font = QFont()
-        total_font.setPointSize(18)
+        total_font.setPointSize(15)
         total_font.setBold(True)
         self.history_total_label.setFont(total_font)
-        self.history_total_label.setStyleSheet("color: #1f5f99;")
-        chart_layout.addWidget(self.history_total_label)
+        self.history_total_label.setStyleSheet("color: #d5dee9;")
+        chart_top_layout.addWidget(self.history_total_label, 1)
+
+        scale_layout = QHBoxLayout()
+        scale_layout.setSpacing(2)
+        self.history_scale_group = QButtonGroup(self)
+        self.history_scale_group.setExclusive(True)
+        scale_options = [
+            ("day", "每日"),
+            ("week", "星期"),
+            ("month", "月"),
+            ("quarter", "3月"),
+            ("half", "半年"),
+            ("year", "年"),
+        ]
+        for scale, text in scale_options:
+            btn = QPushButton(text)
+            btn.setCheckable(True)
+            btn.setMinimumWidth(48)
+            btn.setProperty("scale", scale)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    color: #93a4b7;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 5px 8px;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background: #202733;
+                    color: #d5dee9;
+                }
+                QPushButton:checked {
+                    background: #2b3543;
+                    color: #ffffff;
+                }
+            """)
+            if scale == self._history_scale:
+                btn.setChecked(True)
+            btn.clicked.connect(lambda checked, s=scale: self._on_history_scale_changed(s))
+            self.history_scale_group.addButton(btn)
+            scale_layout.addWidget(btn)
+        chart_top_layout.addLayout(scale_layout)
+        chart_layout.addLayout(chart_top_layout)
 
         self.history_hint_label = QLabel(
-            "預留給 X 軸時間、Y 軸總資產的歷史曲線。下一步需要在資料庫定期保存 snapshot，再接 QtCharts 或 pyqtgraph 繪圖。"
+            "更新價格後會保存每日快照；時間尺度會將每日資料彙整成週、月、季、半年或年。"
         )
         self.history_hint_label.setWordWrap(True)
-        self.history_hint_label.setStyleSheet("color: #5c6f82; font-size: 11pt;")
+        self.history_hint_label.setStyleSheet("color: #93a4b7; font-size: 10pt;")
         chart_layout.addWidget(self.history_hint_label)
         self.history_chart = DailyAssetChart()
         chart_layout.addWidget(self.history_chart, 1)
 
         layout.addWidget(chart_shell, 1)
         return container
+
+    def _on_history_scale_changed(self, scale):
+        self._history_scale = scale
+        if hasattr(self, "history_chart"):
+            self.history_chart.set_scale(scale)
+        self._refresh_history_chart()
     
     def setup_timer(self):
         """設定自動更新計時器（每5分鐘更新一次價格）"""
@@ -1559,11 +1657,19 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "history_chart"):
             return
         snapshots = self.portfolio_manager.get_daily_asset_snapshots()
-        self.history_chart.set_data(snapshots)
+        self.history_chart.set_data(snapshots, self._history_scale)
         if snapshots:
             latest = snapshots[-1]
+            scale_label = {
+                "day": "每日",
+                "week": "星期",
+                "month": "月",
+                "quarter": "3月",
+                "half": "半年",
+                "year": "年",
+            }.get(self._history_scale, "每日")
             self.history_total_label.setText(
-                f"最近快照：{latest['date']}  總資產 NT$ {latest['total_value_twd']:,.2f}"
+                f"{scale_label}  最近快照：{latest['date']}  總資產 NT$ {latest['total_value_twd']:,.2f}"
             )
             self.history_hint_label.setText(
                 f"已保存 {len(snapshots)} 筆每日資料。折線包含總資產、台股收盤市值與美股收盤市值。"
