@@ -1,5 +1,5 @@
 """主視窗"""
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 import sys
@@ -51,6 +51,10 @@ class DailyAssetChart(QWidget):
         super().__init__(parent)
         self._data = []
         self._scale = "day"
+        self._visible_asset_types = set(AssetType)
+        self._hover_x = None
+        self._points = []
+        self.setMouseTracking(True)
         self.setMinimumHeight(360)
 
     def set_data(self, data, scale=None):
@@ -61,6 +65,18 @@ class DailyAssetChart(QWidget):
 
     def set_scale(self, scale):
         self._scale = scale
+        self.update()
+
+    def set_visible_asset_types(self, asset_types):
+        self._visible_asset_types = set(asset_types or [])
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        self._hover_x = event.position().x()
+        self.update()
+
+    def leaveEvent(self, event):
+        self._hover_x = None
         self.update()
 
     def paintEvent(self, event):
@@ -75,7 +91,7 @@ class DailyAssetChart(QWidget):
             painter.drawText(rect, Qt.AlignCenter, "更新價格後會建立每日資產快照")
             return
 
-        display_data = self._aggregate_data(self._data, self._scale)
+        display_data = self._aggregate_data(self._limit_rows(self._data, self._scale), self._scale)
         if not display_data:
             return
 
@@ -86,16 +102,17 @@ class DailyAssetChart(QWidget):
         plot_w = max(1, right - left)
         plot_h = max(1, bottom - top)
 
-        series_defs = [
-            ("total_value_twd", "總資產", QColor("#58d6a3")),
-            ("tw_stock_value_twd", "台股", QColor("#f0b84a")),
-            ("us_stock_value_twd", "美股", QColor("#cb7cff")),
-        ]
+        display_data = [self._row_with_visible_total(row) for row in display_data]
+        series_defs = self._series_defs()
         all_values = [
             float(item.get(key, 0.0) or 0.0)
             for item in display_data
             for key, _label, _color in series_defs
         ]
+        if not all_values:
+            painter.setPen(QColor("#93a4b7"))
+            painter.drawText(rect, Qt.AlignCenter, "請勾選至少一種資產類型")
+            return
         max_v = max(all_values) if all_values else 0.0
         min_v = min(all_values) if all_values else 0.0
         if max_v <= min_v:
@@ -110,10 +127,6 @@ class DailyAssetChart(QWidget):
             painter.drawText(rect.left(), int(y) - 8, 64, 18, Qt.AlignRight, self._format_money(value))
             painter.setPen(QPen(QColor("#2a313b"), 1))
 
-        painter.setPen(QPen(QColor("#3a4452"), 1))
-        painter.drawLine(left, bottom, right, bottom)
-        painter.drawLine(left, top, left, bottom)
-
         count = len(display_data)
 
         def point_at(row_index, value):
@@ -121,14 +134,18 @@ class DailyAssetChart(QWidget):
             y = bottom - ((float(value or 0.0) - min_v) / (max_v - min_v) * plot_h)
             return int(x), int(y)
 
+        x_positions = []
         for key, label, color in series_defs:
             painter.setPen(QPen(color, 2))
             last = None
             for i, item in enumerate(display_data):
                 pt = point_at(i, item.get(key, 0.0))
+                if key == series_defs[0][0]:
+                    x_positions.append(pt[0])
                 if last is not None:
                     painter.drawLine(last[0], last[1], pt[0], pt[1])
                 last = pt
+        self._points = list(zip(x_positions, display_data))
 
         painter.setPen(QColor("#93a4b7"))
         first_date = str(display_data[0].get("date", ""))
@@ -144,6 +161,98 @@ class DailyAssetChart(QWidget):
             painter.setPen(QColor("#d5dee9"))
             painter.drawText(legend_x + 26, legend_y, 70, 18, Qt.AlignLeft, label)
             legend_x += 92
+
+        if self._hover_x is not None and self._points:
+            x, row = min(self._points, key=lambda p: abs(p[0] - self._hover_x))
+            if left <= x <= right:
+                painter.setPen(QPen(QColor("#6d7b8c"), 1))
+                painter.drawLine(x, top, x, bottom)
+                self._draw_hover_box(painter, rect, x, top, row, series_defs)
+
+    def _draw_hover_box(self, painter, rect, x, top, row, series_defs):
+        lines = [str(row.get("date", ""))]
+        for key, label, _color in series_defs:
+            lines.append(f"{label}  NT$ {float(row.get(key, 0.0) or 0.0):,.0f}")
+        box_w = 210
+        box_h = 22 + 20 * len(series_defs)
+        box_x = x + 12
+        if box_x + box_w > rect.right():
+            box_x = x - box_w - 12
+        box_y = top + 8
+        painter.setPen(QPen(QColor("#3a4452"), 1))
+        painter.setBrush(QColor(24, 30, 39, 235))
+        painter.drawRoundedRect(box_x, box_y, box_w, box_h, 6, 6)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QColor("#d5dee9"))
+        painter.drawText(box_x + 10, box_y + 18, lines[0])
+        y = box_y + 40
+        for index, (key, label, color) in enumerate(series_defs):
+            painter.setPen(color)
+            painter.drawText(box_x + 10, y, label)
+            painter.setPen(QColor("#d5dee9"))
+            painter.drawText(box_x + 74, y, f"NT$ {float(row.get(key, 0.0) or 0.0):,.0f}")
+            y += 20
+
+    def _series_defs(self):
+        defs = [("visible_total_value_twd", "總資產", QColor("#58d6a3"))]
+        asset_defs = [
+            (AssetType.TAIWAN_STOCK, "tw_stock_value_twd", "台股", QColor("#f0b84a")),
+            (AssetType.US_STOCK, "us_stock_value_twd", "美股", QColor("#cb7cff")),
+            (AssetType.HK_STOCK, "hk_stock_value_twd", "港股", QColor("#55c7ff")),
+            (AssetType.FUND, "fund_value_twd", "基金", QColor("#ff7ab6")),
+            (AssetType.CRYPTO, "crypto_value_twd", "虛擬貨幣", QColor("#33d6d0")),
+            (AssetType.METAL, "metal_value_twd", "貴金屬", QColor("#ffd166")),
+        ]
+        for asset_type, key, label, color in asset_defs:
+            if asset_type in self._visible_asset_types:
+                defs.append((key, label, color))
+        return defs
+
+    def _row_with_visible_total(self, row):
+        fields = {
+            AssetType.TAIWAN_STOCK: "tw_stock_value_twd",
+            AssetType.US_STOCK: "us_stock_value_twd",
+            AssetType.HK_STOCK: "hk_stock_value_twd",
+            AssetType.FUND: "fund_value_twd",
+            AssetType.CRYPTO: "crypto_value_twd",
+            AssetType.METAL: "metal_value_twd",
+        }
+        total = 0.0
+        for asset_type, key in fields.items():
+            if asset_type in self._visible_asset_types:
+                total += float(row.get(key, 0.0) or 0.0)
+        copied = dict(row)
+        copied["visible_total_value_twd"] = total
+        return copied
+
+    def _limit_rows(self, rows, scale):
+        if not rows:
+            return []
+        days_by_scale = {
+            "day": 92,
+            "week": 370,
+            "month": 365 * 3,
+            "quarter": 365 * 5,
+            "half": 365 * 6,
+            "year": 365 * 10,
+        }
+        days = days_by_scale.get(scale)
+        if not days:
+            return rows
+        try:
+            last = datetime.fromisoformat(str(rows[-1].get("date"))).date()
+        except Exception:
+            return rows
+        start = last - timedelta(days=days)
+        limited = []
+        for row in rows:
+            try:
+                dt = datetime.fromisoformat(str(row.get("date"))).date()
+            except Exception:
+                continue
+            if dt >= start:
+                limited.append(row)
+        return limited or rows[-1:]
 
     def _aggregate_data(self, rows, scale):
         if scale == "day":
@@ -864,14 +973,6 @@ class MainWindow(QMainWindow):
         chart_top_layout = QHBoxLayout()
         chart_top_layout.setSpacing(10)
 
-        self.history_total_label = QLabel("目前總資產：NT$ 0.00")
-        total_font = QFont()
-        total_font.setPointSize(15)
-        total_font.setBold(True)
-        self.history_total_label.setFont(total_font)
-        self.history_total_label.setStyleSheet("color: #d5dee9;")
-        chart_top_layout.addWidget(self.history_total_label, 1)
-
         scale_layout = QHBoxLayout()
         scale_layout.setSpacing(2)
         self.history_scale_group = QButtonGroup(self)
@@ -913,14 +1014,9 @@ class MainWindow(QMainWindow):
             self.history_scale_group.addButton(btn)
             scale_layout.addWidget(btn)
         chart_top_layout.addLayout(scale_layout)
+        chart_top_layout.addStretch()
         chart_layout.addLayout(chart_top_layout)
 
-        self.history_hint_label = QLabel(
-            "更新價格後會保存每日快照；時間尺度會將每日資料彙整成週、月、季、半年或年。"
-        )
-        self.history_hint_label.setWordWrap(True)
-        self.history_hint_label.setStyleSheet("color: #93a4b7; font-size: 10pt;")
-        chart_layout.addWidget(self.history_hint_label)
         self.history_chart = DailyAssetChart()
         chart_layout.addWidget(self.history_chart, 1)
 
@@ -1635,8 +1731,6 @@ class MainWindow(QMainWindow):
         self.total_pnl_label.setText(f"NT$ {total_unreal_twd:,.2f} ({unreal_pct:+.2f}%)")
         self.total_realized_label.setText(f"NT$ {total_realized_twd:,.2f}")
         self.total_combined_pnl_label.setText(f"NT$ {total_combined_twd:,.2f}")
-        if hasattr(self, "history_total_label"):
-            self.history_total_label.setText(f"目前總資產：NT$ {total_value_twd:,.2f}")
         self._refresh_history_chart()
 
         gain_color = "#0f7b59" if total_combined_twd > 0 else "#b42318" if total_combined_twd < 0 else "#14213d"
@@ -1657,23 +1751,12 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "history_chart"):
             return
         snapshots = self.portfolio_manager.get_daily_asset_snapshots()
+        included_types = [
+            asset_type for asset_type, checkbox in self.asset_type_checkboxes.items()
+            if checkbox.isChecked()
+        ]
+        self.history_chart.set_visible_asset_types(included_types)
         self.history_chart.set_data(snapshots, self._history_scale)
-        if snapshots:
-            latest = snapshots[-1]
-            scale_label = {
-                "day": "每日",
-                "week": "星期",
-                "month": "月",
-                "quarter": "3月",
-                "half": "半年",
-                "year": "年",
-            }.get(self._history_scale, "每日")
-            self.history_total_label.setText(
-                f"{scale_label}  最近快照：{latest['date']}  總資產 NT$ {latest['total_value_twd']:,.2f}"
-            )
-            self.history_hint_label.setText(
-                f"已保存 {len(snapshots)} 筆每日資料。折線包含總資產、台股收盤市值與美股收盤市值。"
-            )
     
     def _on_asset_type_checkbox_changed(self):
         """當資產類型 checkbox 狀態改變時，重新計算總資產"""

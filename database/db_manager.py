@@ -63,10 +63,27 @@ class DatabaseManager:
                 total_value_twd REAL NOT NULL DEFAULT 0.0,
                 tw_stock_value_twd REAL NOT NULL DEFAULT 0.0,
                 us_stock_value_twd REAL NOT NULL DEFAULT 0.0,
+                hk_stock_value_twd REAL NOT NULL DEFAULT 0.0,
+                fund_value_twd REAL NOT NULL DEFAULT 0.0,
+                crypto_value_twd REAL NOT NULL DEFAULT 0.0,
+                metal_value_twd REAL NOT NULL DEFAULT 0.0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
         """)
+
+        for column in [
+            "hk_stock_value_twd",
+            "fund_value_twd",
+            "crypto_value_twd",
+            "metal_value_twd",
+        ]:
+            try:
+                cursor.execute(
+                    f"ALTER TABLE daily_asset_snapshots ADD COLUMN {column} REAL NOT NULL DEFAULT 0.0"
+                )
+            except sqlite3.OperationalError:
+                pass
         
         # 如果表已存在但沒有 currency 欄位，則添加
         try:
@@ -131,6 +148,10 @@ class DatabaseManager:
         total_value_twd: float,
         tw_stock_value_twd: float,
         us_stock_value_twd: float,
+        hk_stock_value_twd: float = 0.0,
+        fund_value_twd: float = 0.0,
+        crypto_value_twd: float = 0.0,
+        metal_value_twd: float = 0.0,
     ):
         """新增或更新每日資產快照。"""
         now = datetime.now().isoformat(timespec="seconds")
@@ -139,19 +160,28 @@ class DatabaseManager:
         cursor.execute("""
             INSERT INTO daily_asset_snapshots (
                 snapshot_date, total_value_twd, tw_stock_value_twd,
-                us_stock_value_twd, created_at, updated_at
+                us_stock_value_twd, hk_stock_value_twd, fund_value_twd,
+                crypto_value_twd, metal_value_twd, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(snapshot_date) DO UPDATE SET
                 total_value_twd = excluded.total_value_twd,
                 tw_stock_value_twd = excluded.tw_stock_value_twd,
                 us_stock_value_twd = excluded.us_stock_value_twd,
+                hk_stock_value_twd = excluded.hk_stock_value_twd,
+                fund_value_twd = excluded.fund_value_twd,
+                crypto_value_twd = excluded.crypto_value_twd,
+                metal_value_twd = excluded.metal_value_twd,
                 updated_at = excluded.updated_at
         """, (
             snapshot_date.isoformat(),
             float(total_value_twd or 0.0),
             float(tw_stock_value_twd or 0.0),
             float(us_stock_value_twd or 0.0),
+            float(hk_stock_value_twd or 0.0),
+            float(fund_value_twd or 0.0),
+            float(crypto_value_twd or 0.0),
+            float(metal_value_twd or 0.0),
             now,
             now,
         ))
@@ -163,7 +193,8 @@ class DatabaseManager:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT snapshot_date, total_value_twd, tw_stock_value_twd, us_stock_value_twd
+            SELECT snapshot_date, total_value_twd, tw_stock_value_twd, us_stock_value_twd,
+                   hk_stock_value_twd, fund_value_twd, crypto_value_twd, metal_value_twd
             FROM daily_asset_snapshots
             ORDER BY snapshot_date ASC
         """)
@@ -175,6 +206,10 @@ class DatabaseManager:
                 "total_value_twd": float(row[1] or 0.0),
                 "tw_stock_value_twd": float(row[2] or 0.0),
                 "us_stock_value_twd": float(row[3] or 0.0),
+                "hk_stock_value_twd": float(row[4] or 0.0),
+                "fund_value_twd": float(row[5] or 0.0),
+                "crypto_value_twd": float(row[6] or 0.0),
+                "metal_value_twd": float(row[7] or 0.0),
             }
             for row in rows
         ]

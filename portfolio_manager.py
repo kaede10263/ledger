@@ -412,7 +412,8 @@ class PortfolioManager:
 
         first_tx_date = min(self._normalize_tx_date(t.date).date() for t in self.transactions)
         today = datetime.now().date()
-        existing = set(self.db_manager.load_daily_asset_snapshot_dates())
+        schema_version = self.db_manager.get_setting("daily_asset_snapshots_version")
+        existing = set() if schema_version != "2" else set(self.db_manager.load_daily_asset_snapshot_dates())
         missing_dates = [
             first_tx_date + timedelta(days=i)
             for i in range((today - first_tx_date).days + 1)
@@ -428,26 +429,42 @@ class PortfolioManager:
         for index, snapshot_date in enumerate(missing_dates, start=1):
             if index == 1 or index == max_dates or index % 10 == 0:
                 _progress(f"補齊每日資產快照... ({index}/{max_dates})")
-            total, tw_stock, us_stock = self._calculate_snapshot_values(
+            values = self._calculate_snapshot_values(
                 snapshot_date, price_cache=price_cache, fx_cache=fx_cache
             )
-            self.db_manager.save_daily_asset_snapshot(snapshot_date, total, tw_stock, us_stock)
+            self.db_manager.save_daily_asset_snapshot(
+                snapshot_date,
+                values["total_value_twd"],
+                values["tw_stock_value_twd"],
+                values["us_stock_value_twd"],
+                values["hk_stock_value_twd"],
+                values["fund_value_twd"],
+                values["crypto_value_twd"],
+                values["metal_value_twd"],
+            )
+        self.db_manager.set_setting("daily_asset_snapshots_version", "2")
 
     def _calculate_snapshot_values(
         self,
         snapshot_date: date_type,
         price_cache: Dict[tuple[str, AssetType, date_type], Optional[float]],
         fx_cache: Dict[tuple[str, date_type], float],
-    ) -> tuple[float, float, float]:
-        """計算指定日期收盤後的總資產、台股、美股市值（TWD）。"""
+    ) -> Dict[str, float]:
+        """計算指定日期收盤後的各類資產市值（TWD）。"""
         snapshot_transactions = [
             t for t in self.transactions
             if self._normalize_tx_date(t.date).date() <= snapshot_date
         ]
         assets = self._build_assets_from_transactions(snapshot_transactions, update_tracking=False)
-        total_twd = 0.0
-        tw_stock_twd = 0.0
-        us_stock_twd = 0.0
+        values = {
+            "total_value_twd": 0.0,
+            "tw_stock_value_twd": 0.0,
+            "us_stock_value_twd": 0.0,
+            "hk_stock_value_twd": 0.0,
+            "fund_value_twd": 0.0,
+            "crypto_value_twd": 0.0,
+            "metal_value_twd": 0.0,
+        }
 
         for asset in assets.values():
             if abs(asset.quantity) <= 1e-12:
@@ -458,13 +475,21 @@ class PortfolioManager:
             value = asset.quantity * price
             value_currency = "USD" if asset.asset_type in [AssetType.METAL, AssetType.CRYPTO] else self._get_asset_currency(asset)
             value_twd = self._convert_to_twd_on_date(value, value_currency, snapshot_date, fx_cache)
-            total_twd += value_twd
+            values["total_value_twd"] += value_twd
             if asset.asset_type == AssetType.TAIWAN_STOCK:
-                tw_stock_twd += value_twd
+                values["tw_stock_value_twd"] += value_twd
             elif asset.asset_type == AssetType.US_STOCK:
-                us_stock_twd += value_twd
+                values["us_stock_value_twd"] += value_twd
+            elif asset.asset_type == AssetType.HK_STOCK:
+                values["hk_stock_value_twd"] += value_twd
+            elif asset.asset_type == AssetType.FUND:
+                values["fund_value_twd"] += value_twd
+            elif asset.asset_type == AssetType.CRYPTO:
+                values["crypto_value_twd"] += value_twd
+            elif asset.asset_type == AssetType.METAL:
+                values["metal_value_twd"] += value_twd
 
-        return total_twd, tw_stock_twd, us_stock_twd
+        return values
 
     def _convert_to_twd_on_date(
         self,
