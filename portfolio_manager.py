@@ -289,10 +289,7 @@ class PortfolioManager:
                             position.current_price = price
                             position.last_updated = datetime.now()
 
-        _progress("補齊每日資產快照...")
-        self.update_daily_asset_snapshots(progress_callback=progress_callback)
-
-        _progress("更新完成")
+        _progress("價格更新完成")
     
     def _get_adapter(self, asset_type: AssetType):
         """獲取對應資產類型的適配器"""

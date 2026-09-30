@@ -1071,6 +1071,7 @@ class MainWindow(QMainWindow):
 
         class _RefreshWorker(QObject):
             status = Signal(str)
+            prices_updated = Signal()
             finished = Signal()
             error = Signal(str)
 
@@ -1084,6 +1085,9 @@ class MainWindow(QMainWindow):
                     self._pm.load_from_database()
                     self.status.emit("開始更新價格...")
                     self._pm.update_prices(progress_callback=lambda m: self.status.emit(m))
+                    self.prices_updated.emit()
+                    self.status.emit("補齊每日資產快照...")
+                    self._pm.update_daily_asset_snapshots(progress_callback=lambda m: self.status.emit(m))
                     self.finished.emit()
                 except Exception as e:
                     self.error.emit(str(e))
@@ -1094,6 +1098,7 @@ class MainWindow(QMainWindow):
 
         self._refresh_thread.started.connect(self._refresh_worker.run)
         self._refresh_worker.status.connect(self._set_refresh_status)
+        self._refresh_worker.prices_updated.connect(self._on_prices_updated)
         self._refresh_worker.finished.connect(self._on_refresh_finished)
         self._refresh_worker.error.connect(self._on_refresh_error)
         self._refresh_worker.finished.connect(self._refresh_thread.quit)
@@ -1114,6 +1119,10 @@ class MainWindow(QMainWindow):
         self._set_refresh_status("更新完成")
         self.refresh_btn.setEnabled(True)
         self.refresh_btn.setText("更新價格")
+
+    def _on_prices_updated(self):
+        self.refresh_table()
+        self._set_refresh_status("報價已更新，正在補圖表資料...")
 
     def _on_refresh_error(self, error_msg: str):
         self._set_refresh_status("更新失敗")
