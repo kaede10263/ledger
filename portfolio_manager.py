@@ -1,6 +1,6 @@
 """投資組合管理器"""
 from collections import defaultdict
-from datetime import datetime, date as date_type, time as time_type
+from datetime import datetime, date as date_type, time as time_type, timedelta
 from typing import Dict, List, Optional
 import uuid
 
@@ -289,6 +289,9 @@ class PortfolioManager:
                             position.current_price = price
                             position.last_updated = datetime.now()
 
+        _progress("補齊每日資產快照...")
+        self.update_daily_asset_snapshots(progress_callback=progress_callback)
+
         _progress("更新完成")
     
     def _get_adapter(self, asset_type: AssetType):
@@ -394,6 +397,149 @@ class PortfolioManager:
                 total += self.currency_converter.convert_from_twd(twd, target_currency)
         return total
 
+    def get_daily_asset_snapshots(self) -> List[Dict[str, float]]:
+        """取得每日資產快照，供 UI 畫趨勢圖。"""
+        return self.db_manager.load_daily_asset_snapshots()
+
+    def update_daily_asset_snapshots(self, progress_callback=None):
+        """補齊缺漏日期，並更新今天的每日資產快照。"""
+        def _progress(msg: str):
+            if callable(progress_callback):
+                progress_callback(msg)
+
+        if not self.transactions:
+            return
+
+        first_tx_date = min(self._normalize_tx_date(t.date).date() for t in self.transactions)
+        today = datetime.now().date()
+        existing = set(self.db_manager.load_daily_asset_snapshot_dates())
+        missing_dates = [
+            first_tx_date + timedelta(days=i)
+            for i in range((today - first_tx_date).days + 1)
+            if first_tx_date + timedelta(days=i) not in existing or first_tx_date + timedelta(days=i) == today
+        ]
+
+        if not missing_dates:
+            return
+
+        price_cache: Dict[tuple[str, AssetType, date_type], Optional[float]] = {}
+        fx_cache: Dict[tuple[str, date_type], float] = {}
+        max_dates = len(missing_dates)
+        for index, snapshot_date in enumerate(missing_dates, start=1):
+            if index == 1 or index == max_dates or index % 10 == 0:
+                _progress(f"補齊每日資產快照... ({index}/{max_dates})")
+            total, tw_stock, us_stock = self._calculate_snapshot_values(
+                snapshot_date, price_cache=price_cache, fx_cache=fx_cache
+            )
+            self.db_manager.save_daily_asset_snapshot(snapshot_date, total, tw_stock, us_stock)
+
+    def _calculate_snapshot_values(
+        self,
+        snapshot_date: date_type,
+        price_cache: Dict[tuple[str, AssetType, date_type], Optional[float]],
+        fx_cache: Dict[tuple[str, date_type], float],
+    ) -> tuple[float, float, float]:
+        """計算指定日期收盤後的總資產、台股、美股市值（TWD）。"""
+        snapshot_transactions = [
+            t for t in self.transactions
+            if self._normalize_tx_date(t.date).date() <= snapshot_date
+        ]
+        assets = self._build_assets_from_transactions(snapshot_transactions, update_tracking=False)
+        total_twd = 0.0
+        tw_stock_twd = 0.0
+        us_stock_twd = 0.0
+
+        for asset in assets.values():
+            if abs(asset.quantity) <= 1e-12:
+                continue
+            price = self._get_snapshot_price(asset, snapshot_date, price_cache)
+            if price is None:
+                price = asset.current_price or 0.0
+            value = asset.quantity * price
+            value_currency = "USD" if asset.asset_type in [AssetType.METAL, AssetType.CRYPTO] else self._get_asset_currency(asset)
+            value_twd = self._convert_to_twd_on_date(value, value_currency, snapshot_date, fx_cache)
+            total_twd += value_twd
+            if asset.asset_type == AssetType.TAIWAN_STOCK:
+                tw_stock_twd += value_twd
+            elif asset.asset_type == AssetType.US_STOCK:
+                us_stock_twd += value_twd
+
+        return total_twd, tw_stock_twd, us_stock_twd
+
+    def _convert_to_twd_on_date(
+        self,
+        amount: float,
+        currency: str,
+        snapshot_date: date_type,
+        fx_cache: Dict[tuple[str, date_type], float],
+    ) -> float:
+        if currency == "TWD":
+            return amount
+        cache_key = (currency, snapshot_date)
+        if cache_key in fx_cache:
+            return amount * fx_cache[cache_key]
+
+        yahoo_symbol = "USDTWD=X" if currency == "USD" else "HKDTWD=X" if currency == "HKD" else None
+        fallback = 32.0 if currency == "USD" else 4.1 if currency == "HKD" else 1.0
+        rate = fallback
+        if yahoo_symbol:
+            close = self._get_yahoo_daily_close(yahoo_symbol, snapshot_date)
+            if close is not None:
+                rate = close
+            elif currency == "USD":
+                rate = self.currency_converter.get_usd_to_twd_rate()
+            elif currency == "HKD":
+                rate = self.currency_converter.get_hkd_to_twd_rate()
+        fx_cache[cache_key] = rate
+        return amount * rate
+
+    def _get_snapshot_price(
+        self,
+        asset: Asset,
+        snapshot_date: date_type,
+        price_cache: Dict[tuple[str, AssetType, date_type], Optional[float]],
+    ) -> Optional[float]:
+        cache_key = (asset.symbol, asset.asset_type, snapshot_date)
+        if cache_key in price_cache:
+            return price_cache[cache_key]
+
+        price = None
+        try:
+            if asset.asset_type in [AssetType.TAIWAN_STOCK, AssetType.US_STOCK, AssetType.HK_STOCK, AssetType.FUND]:
+                adapter = StockPriceAdapter()
+                yahoo_symbol = adapter._get_yahoo_symbol(asset.symbol, asset.asset_type)
+                price = self._get_yahoo_daily_close(yahoo_symbol, snapshot_date)
+                if price is None and asset.asset_type == AssetType.TAIWAN_STOCK and "." not in asset.symbol:
+                    price = self._get_yahoo_daily_close(f"{asset.symbol}.TWO", snapshot_date)
+            elif asset.asset_type == AssetType.METAL:
+                adapter = GoldPriceAdapter()
+                price = self._get_yahoo_daily_close(adapter._get_yahoo_symbol(asset.symbol), snapshot_date)
+            elif asset.asset_type == AssetType.CRYPTO:
+                price = self._get_yahoo_daily_close(f"{asset.symbol.upper()}-USD", snapshot_date)
+        except Exception:
+            price = None
+
+        price_cache[cache_key] = price
+        return price
+
+    def _get_yahoo_daily_close(self, yahoo_symbol: str, snapshot_date: date_type) -> Optional[float]:
+        """抓指定日期或最近前一個交易日的日收盤價。"""
+        try:
+            import yfinance as yf
+            start = snapshot_date - timedelta(days=7)
+            end = snapshot_date + timedelta(days=1)
+            data = yf.Ticker(yahoo_symbol).history(start=start.isoformat(), end=end.isoformat(), interval="1d")
+            if data.empty:
+                return None
+            if getattr(data.index, "tz", None) is not None:
+                data.index = data.index.tz_convert(None)
+            eligible = data[data.index.date <= snapshot_date]
+            if eligible.empty:
+                return None
+            return float(eligible["Close"].iloc[-1])
+        except Exception:
+            return None
+
     def _get_asset_currency(self, asset: Asset) -> str:
         """獲取資產的貨幣（從交易記錄中推斷）"""
         # 查找該資產的第一筆交易記錄以確定貨幣
@@ -445,8 +591,18 @@ class PortfolioManager:
     
     def _recalculate_assets(self):
         """重新計算所有資產（當交易被刪除時）"""
+        self.realized_pnl_by_transaction_id = {}
+        self.realized_cost_basis_by_transaction_id = {}
+        self.buy_remaining_qty_by_transaction_id = {}
+        self.buy_remaining_cost_basis_by_transaction_id = {}
+        self.assets = self._build_assets_from_transactions(self.transactions, update_tracking=True)
+
+    def _build_assets_from_transactions(
+        self, transactions: List[Transaction], update_tracking: bool = False
+    ) -> Dict[str, Asset]:
+        """依交易清單建立資產狀態，不改動目前 PortfolioManager 狀態。"""
         ordered = sorted(
-            self.transactions,
+            transactions,
             key=lambda t: (
                 self._normalize_tx_date(t.date),
                 0 if t.transaction_type == TransactionType.BUY else 1,  # 同天固定先處理買入
@@ -454,27 +610,30 @@ class PortfolioManager:
             ),
         )
         fifo = self._compute_fifo_realized_by_asset(ordered)
-        self.realized_pnl_by_transaction_id = {}
-        self.realized_cost_basis_by_transaction_id = {}
-        self.buy_remaining_qty_by_transaction_id = {}
-        self.buy_remaining_cost_basis_by_transaction_id = {}
-        for _key, st in fifo.items():
-            for tx_id, pnl in st.get("realized_pnl_by_sell_id", {}).items():
-                self.realized_pnl_by_transaction_id[tx_id] = float(pnl)
-            for tx_id, cost_basis in st.get("cost_basis_by_sell_id", {}).items():
-                self.realized_cost_basis_by_transaction_id[tx_id] = float(cost_basis)
-            for tx_id, rem_qty in st.get("buy_remaining_qty_by_buy_id", {}).items():
-                self.buy_remaining_qty_by_transaction_id[tx_id] = float(rem_qty)
-            for tx_id, cost_basis in st.get("buy_remaining_cost_basis_by_buy_id", {}).items():
-                self.buy_remaining_cost_basis_by_transaction_id[tx_id] = float(cost_basis)
+        assets: Dict[str, Asset] = {}
+        prev_assets = self.assets
+        self.assets = assets
+        if update_tracking:
+            for _key, st in fifo.items():
+                for tx_id, pnl in st.get("realized_pnl_by_sell_id", {}).items():
+                    self.realized_pnl_by_transaction_id[tx_id] = float(pnl)
+                for tx_id, cost_basis in st.get("cost_basis_by_sell_id", {}).items():
+                    self.realized_cost_basis_by_transaction_id[tx_id] = float(cost_basis)
+                for tx_id, rem_qty in st.get("buy_remaining_qty_by_buy_id", {}).items():
+                    self.buy_remaining_qty_by_transaction_id[tx_id] = float(rem_qty)
+                for tx_id, cost_basis in st.get("buy_remaining_cost_basis_by_buy_id", {}).items():
+                    self.buy_remaining_cost_basis_by_transaction_id[tx_id] = float(cost_basis)
 
-        self.assets.clear()
-        for transaction in ordered:
-            self._update_asset_from_transaction(transaction)
-        for key, asset in self.assets.items():
-            st = fifo.get(key, {})
-            asset.realized_pnl = float(st.get("realized_pnl", 0.0))
-            asset.total_buy_cash = float(st.get("total_buy_cash", 0.0))
+        try:
+            for transaction in ordered:
+                self._update_asset_from_transaction(transaction)
+            for key, asset in self.assets.items():
+                st = fifo.get(key, {})
+                asset.realized_pnl = float(st.get("realized_pnl", 0.0))
+                asset.total_buy_cash = float(st.get("total_buy_cash", 0.0))
+            return assets
+        finally:
+            self.assets = prev_assets
 
     def _normalize_tx_date(self, d) -> datetime:
         """

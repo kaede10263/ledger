@@ -1,7 +1,7 @@
 """資料庫管理器"""
 import sqlite3
-from datetime import datetime
-from typing import List, Optional
+from datetime import date, datetime
+from typing import Dict, List, Optional
 from pathlib import Path
 
 from models.transaction import Transaction, TransactionType
@@ -53,6 +53,18 @@ class DatabaseManager:
                 symbol TEXT NOT NULL,
                 sort_index INTEGER NOT NULL,
                 PRIMARY KEY (asset_type, symbol)
+            )
+        """)
+
+        # 每日資產快照：用於資產趨勢圖
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS daily_asset_snapshots (
+                snapshot_date TEXT PRIMARY KEY,
+                total_value_twd REAL NOT NULL DEFAULT 0.0,
+                tw_stock_value_twd REAL NOT NULL DEFAULT 0.0,
+                us_stock_value_twd REAL NOT NULL DEFAULT 0.0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
         """)
         
@@ -112,6 +124,75 @@ class DatabaseManager:
         rows = cursor.fetchall()
         conn.close()
         return [r[0] for r in rows]
+
+    def save_daily_asset_snapshot(
+        self,
+        snapshot_date: date,
+        total_value_twd: float,
+        tw_stock_value_twd: float,
+        us_stock_value_twd: float,
+    ):
+        """新增或更新每日資產快照。"""
+        now = datetime.now().isoformat(timespec="seconds")
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO daily_asset_snapshots (
+                snapshot_date, total_value_twd, tw_stock_value_twd,
+                us_stock_value_twd, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_date) DO UPDATE SET
+                total_value_twd = excluded.total_value_twd,
+                tw_stock_value_twd = excluded.tw_stock_value_twd,
+                us_stock_value_twd = excluded.us_stock_value_twd,
+                updated_at = excluded.updated_at
+        """, (
+            snapshot_date.isoformat(),
+            float(total_value_twd or 0.0),
+            float(tw_stock_value_twd or 0.0),
+            float(us_stock_value_twd or 0.0),
+            now,
+            now,
+        ))
+        conn.commit()
+        conn.close()
+
+    def load_daily_asset_snapshots(self) -> List[Dict[str, float]]:
+        """載入每日資產快照，依日期排序。"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT snapshot_date, total_value_twd, tw_stock_value_twd, us_stock_value_twd
+            FROM daily_asset_snapshots
+            ORDER BY snapshot_date ASC
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        return [
+            {
+                "date": row[0],
+                "total_value_twd": float(row[1] or 0.0),
+                "tw_stock_value_twd": float(row[2] or 0.0),
+                "us_stock_value_twd": float(row[3] or 0.0),
+            }
+            for row in rows
+        ]
+
+    def load_daily_asset_snapshot_dates(self) -> List[date]:
+        """載入已存在快照日期。"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT snapshot_date FROM daily_asset_snapshots ORDER BY snapshot_date ASC")
+        rows = cursor.fetchall()
+        conn.close()
+        dates = []
+        for row in rows:
+            try:
+                dates.append(date.fromisoformat(row[0]))
+            except ValueError:
+                continue
+        return dates
     
     def save_transaction(self, transaction: Transaction):
         """儲存交易記錄"""

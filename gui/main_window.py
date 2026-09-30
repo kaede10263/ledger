@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QAbstractItemView
 )
 from PySide6.QtCore import Qt, QDate, QTimer, QPoint, QObject, Signal, QThread
-from PySide6.QtGui import QFont, QPalette, QAction, QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen, QAction, QKeySequence, QShortcut
 from shiboken6 import isValid
 
 from portfolio_manager import PortfolioManager
@@ -41,6 +41,105 @@ class AssetTreeWidget(QTreeWidget):
         super().dropEvent(event)
         if callable(self._on_order_changed):
             self._on_order_changed(self._asset_type)
+
+
+class DailyAssetChart(QWidget):
+    """簡易每日資產折線圖，不額外依賴圖表套件。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._data = []
+        self.setMinimumHeight(360)
+
+    def set_data(self, data):
+        self._data = data or []
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(18, 18, -18, -18)
+        painter.fillRect(rect, QColor("#ffffff"))
+
+        if not self._data:
+            painter.setPen(QColor("#6b7c8f"))
+            painter.drawText(rect, Qt.AlignCenter, "更新價格後會建立每日資產快照")
+            return
+
+        left = rect.left() + 72
+        right = rect.right() - 22
+        top = rect.top() + 20
+        bottom = rect.bottom() - 46
+        plot_w = max(1, right - left)
+        plot_h = max(1, bottom - top)
+
+        series_defs = [
+            ("total_value_twd", "總資產", QColor("#1f5f99")),
+            ("tw_stock_value_twd", "台股", QColor("#0f7b59")),
+            ("us_stock_value_twd", "美股", QColor("#b35c00")),
+        ]
+        all_values = [
+            float(item.get(key, 0.0) or 0.0)
+            for item in self._data
+            for key, _label, _color in series_defs
+        ]
+        max_v = max(all_values) if all_values else 0.0
+        min_v = min(all_values) if all_values else 0.0
+        if max_v <= min_v:
+            max_v = min_v + 1.0
+
+        painter.setPen(QPen(QColor("#d8e0ea"), 1))
+        for i in range(5):
+            y = top + (plot_h * i / 4)
+            painter.drawLine(left, int(y), right, int(y))
+            value = max_v - ((max_v - min_v) * i / 4)
+            painter.setPen(QColor("#6b7c8f"))
+            painter.drawText(rect.left(), int(y) - 8, 64, 18, Qt.AlignRight, self._format_money(value))
+            painter.setPen(QPen(QColor("#d8e0ea"), 1))
+
+        painter.setPen(QPen(QColor("#9fb3c8"), 1))
+        painter.drawLine(left, bottom, right, bottom)
+        painter.drawLine(left, top, left, bottom)
+
+        count = len(self._data)
+
+        def point_at(row_index, value):
+            x = left if count == 1 else left + (plot_w * row_index / (count - 1))
+            y = bottom - ((float(value or 0.0) - min_v) / (max_v - min_v) * plot_h)
+            return int(x), int(y)
+
+        for key, label, color in series_defs:
+            painter.setPen(QPen(color, 2))
+            last = None
+            for i, item in enumerate(self._data):
+                pt = point_at(i, item.get(key, 0.0))
+                if last is not None:
+                    painter.drawLine(last[0], last[1], pt[0], pt[1])
+                last = pt
+
+        painter.setPen(QColor("#506070"))
+        first_date = str(self._data[0].get("date", ""))
+        last_date = str(self._data[-1].get("date", ""))
+        painter.drawText(left, bottom + 20, 120, 20, Qt.AlignLeft, first_date)
+        painter.drawText(right - 120, bottom + 20, 120, 20, Qt.AlignRight, last_date)
+
+        legend_x = left
+        legend_y = rect.top()
+        for _key, label, color in series_defs:
+            painter.setPen(QPen(color, 3))
+            painter.drawLine(legend_x, legend_y + 8, legend_x + 20, legend_y + 8)
+            painter.setPen(QColor("#324457"))
+            painter.drawText(legend_x + 26, legend_y, 70, 18, Qt.AlignLeft, label)
+            legend_x += 92
+
+    def _format_money(self, value):
+        abs_v = abs(value)
+        if abs_v >= 100000000:
+            return f"{value / 100000000:.1f}億"
+        if abs_v >= 10000:
+            return f"{value / 10000:.1f}萬"
+        return f"{value:.0f}"
 
 
 class TransactionDialog(QDialog):
@@ -418,7 +517,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Personal Portfolio Dashboard")
         self.setMinimumSize(1200, 800)
         # 儲存每個資產類型的排序設定
-        self.sort_settings = {}  # {AssetType: {'key': 'symbol', 'order': 'asc'}}
+        self.sort_settings = {
+            asset_type: {'key': 'value', 'order': 'desc'}
+            for asset_type in [
+                AssetType.TAIWAN_STOCK, AssetType.US_STOCK, AssetType.HK_STOCK,
+                AssetType.FUND, AssetType.CRYPTO, AssetType.METAL
+            ]
+        }
         # 手拉排序（從 DB 載入）
         self.manual_order = {}  # {AssetType: [symbol, ...]}
         self.setup_ui()
@@ -438,6 +543,12 @@ class MainWindow(QMainWindow):
                 cb.setChecked(at.value in included)
                 cb.blockSignals(False)
 
+        hide_zero = self.portfolio_manager.db_manager.get_setting("hide_zero_quantity_assets")
+        if hasattr(self, "hide_zero_quantity_checkbox") and hide_zero is not None:
+            self.hide_zero_quantity_checkbox.blockSignals(True)
+            self.hide_zero_quantity_checkbox.setChecked(hide_zero == "1")
+            self.hide_zero_quantity_checkbox.blockSignals(False)
+
         # 手拉排序設定
         for at in self.asset_sections.keys():
             self.manual_order[at] = self.portfolio_manager.db_manager.load_asset_order(at)
@@ -448,6 +559,10 @@ class MainWindow(QMainWindow):
             if cb.isChecked()
         ]
         self.portfolio_manager.db_manager.set_setting("included_asset_types", ",".join(included))
+
+    def _save_hide_zero_setting(self):
+        value = "1" if self.hide_zero_quantity_checkbox.isChecked() else "0"
+        self.portfolio_manager.db_manager.set_setting("hide_zero_quantity_assets", value)
 
     def _on_manual_order_changed(self, asset_type: AssetType):
         """當手拉排序發生變化時，將順序保存到 DB。"""
@@ -465,6 +580,7 @@ class MainWindow(QMainWindow):
             symbols.append(asset.symbol)
 
         self.manual_order[asset_type] = symbols
+        self.sort_settings.pop(asset_type, None)
         self.portfolio_manager.db_manager.save_asset_order(asset_type, symbols)
     
     def setup_ui(self):
@@ -570,12 +686,16 @@ class MainWindow(QMainWindow):
         button_layout.setSpacing(8)
         self.add_transaction_btn = QPushButton("新增交易")
         self.refresh_btn = QPushButton("更新價格")
+        self.hide_zero_quantity_checkbox = QCheckBox("隱藏數量 0")
+        self.hide_zero_quantity_checkbox.setStyleSheet("color: #506070; padding-left: 8px;")
+        self.hide_zero_quantity_checkbox.stateChanged.connect(self._on_hide_zero_quantity_changed)
         self.refresh_status_label = QLabel("")
         self.refresh_status_label.setStyleSheet("color: #5c6f82; padding-left: 8px;")
         self.add_transaction_btn.clicked.connect(self.add_transaction)
         self.refresh_btn.clicked.connect(self.refresh_prices)
         button_layout.addWidget(self.add_transaction_btn)
         button_layout.addWidget(self.refresh_btn)
+        button_layout.addWidget(self.hide_zero_quantity_checkbox)
         button_layout.addWidget(self.refresh_status_label, 1)
         button_layout.addStretch()
         layout.addLayout(button_layout)
@@ -709,7 +829,8 @@ class MainWindow(QMainWindow):
         self.history_hint_label.setWordWrap(True)
         self.history_hint_label.setStyleSheet("color: #5c6f82; font-size: 11pt;")
         chart_layout.addWidget(self.history_hint_label)
-        chart_layout.addStretch()
+        self.history_chart = DailyAssetChart()
+        chart_layout.addWidget(self.history_chart, 1)
 
         layout.addWidget(chart_shell, 1)
         return container
@@ -1121,6 +1242,8 @@ class MainWindow(QMainWindow):
             table.clear()  # 清空樹狀表格
             
             assets = assets_by_type.get(asset_type, [])
+            if self.hide_zero_quantity_checkbox.isChecked():
+                assets = [asset for asset in assets if abs(asset.quantity) > 1e-12]
             
             # 應用排序
             assets = self._apply_sort(asset_type, assets)
@@ -1416,6 +1539,7 @@ class MainWindow(QMainWindow):
         self.total_combined_pnl_label.setText(f"NT$ {total_combined_twd:,.2f}")
         if hasattr(self, "history_total_label"):
             self.history_total_label.setText(f"目前總資產：NT$ {total_value_twd:,.2f}")
+        self._refresh_history_chart()
 
         gain_color = "#0f7b59" if total_combined_twd > 0 else "#b42318" if total_combined_twd < 0 else "#14213d"
         unreal_color = "#0f7b59" if total_unreal_twd > 0 else "#b42318" if total_unreal_twd < 0 else "#14213d"
@@ -1430,10 +1554,29 @@ class MainWindow(QMainWindow):
                 border-radius: 8px;
             }}
         """)
+
+    def _refresh_history_chart(self):
+        if not hasattr(self, "history_chart"):
+            return
+        snapshots = self.portfolio_manager.get_daily_asset_snapshots()
+        self.history_chart.set_data(snapshots)
+        if snapshots:
+            latest = snapshots[-1]
+            self.history_total_label.setText(
+                f"最近快照：{latest['date']}  總資產 NT$ {latest['total_value_twd']:,.2f}"
+            )
+            self.history_hint_label.setText(
+                f"已保存 {len(snapshots)} 筆每日資料。折線包含總資產、台股收盤市值與美股收盤市值。"
+            )
     
     def _on_asset_type_checkbox_changed(self):
         """當資產類型 checkbox 狀態改變時，重新計算總資產"""
         self._save_included_types_setting()
+        self.refresh_table()
+
+    def _on_hide_zero_quantity_changed(self):
+        """切換是否隱藏數量為 0 的資產。"""
+        self._save_hide_zero_setting()
         self.refresh_table()
     
     def _show_context_menu(self, position: QPoint, table: QTreeWidget, asset_type: AssetType):
