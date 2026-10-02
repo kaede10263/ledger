@@ -1,4 +1,5 @@
 """資料庫管理器"""
+import math
 import sqlite3
 from datetime import date, datetime
 from typing import Dict, List, Optional
@@ -154,6 +155,13 @@ class DatabaseManager:
         metal_value_twd: float = 0.0,
     ):
         """新增或更新每日資產快照。"""
+        def safe_amount(value) -> float:
+            try:
+                amount = float(value)
+            except (TypeError, ValueError):
+                return 0.0
+            return amount if math.isfinite(amount) else 0.0
+
         now = datetime.now().isoformat(timespec="seconds")
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -175,13 +183,13 @@ class DatabaseManager:
                 updated_at = excluded.updated_at
         """, (
             snapshot_date.isoformat(),
-            float(total_value_twd or 0.0),
-            float(tw_stock_value_twd or 0.0),
-            float(us_stock_value_twd or 0.0),
-            float(hk_stock_value_twd or 0.0),
-            float(fund_value_twd or 0.0),
-            float(crypto_value_twd or 0.0),
-            float(metal_value_twd or 0.0),
+            safe_amount(total_value_twd),
+            safe_amount(tw_stock_value_twd),
+            safe_amount(us_stock_value_twd),
+            safe_amount(hk_stock_value_twd),
+            safe_amount(fund_value_twd),
+            safe_amount(crypto_value_twd),
+            safe_amount(metal_value_twd),
             now,
             now,
         ))

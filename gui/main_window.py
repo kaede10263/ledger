@@ -1100,7 +1100,10 @@ class MainWindow(QMainWindow):
                     self._pm.update_prices(progress_callback=lambda m: self.status.emit(m))
                     self.prices_updated.emit()
                     self.status.emit("補齊每日資產快照...")
-                    self._pm.update_daily_asset_snapshots(progress_callback=lambda m: self.status.emit(m))
+                    try:
+                        self._pm.update_daily_asset_snapshots(progress_callback=lambda m: self.status.emit(m))
+                    except Exception as snapshot_error:
+                        self.status.emit(f"圖表資料補齊失敗，報價已更新：{snapshot_error}")
                     self.finished.emit()
                 except Exception as e:
                     self.error.emit(str(e))
