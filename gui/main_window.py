@@ -1303,9 +1303,9 @@ class MainWindow(QMainWindow):
         )
         label.setText(stats_text)
         
-        if total_pnl > 0:
+        if total_pnl_percent > 0:
             label.setStyleSheet("color: darkgreen; font-weight: bold;")
-        elif total_pnl < 0:
+        elif total_pnl_percent < 0:
             label.setStyleSheet("color: darkred; font-weight: bold;")
         else:
             label.setStyleSheet("color: #666;")
@@ -1554,10 +1554,10 @@ class MainWindow(QMainWindow):
                     pnl_text = f"{sym} {pnl:.2f} ({pnl_percent:+.2f}%)"
                 main_item.setText(6, pnl_text)
                 
-                # 設定顏色
-                if pnl > 0:
+                # 設定顏色：跟畫面上括號顯示的百分比一致
+                if pnl_percent > 0:
                     main_item.setForeground(6, Qt.darkGreen)
-                elif pnl < 0:
+                elif pnl_percent < 0:
                     main_item.setForeground(6, Qt.darkRed)
                 
                 # 儲存資產資訊到項目中，以便刪除時使用
@@ -1638,10 +1638,10 @@ class MainWindow(QMainWindow):
                             pos_pnl_text = f"{display_symbol} {pos_pnl:.2f} ({pos_pnl_percent:+.2f}%)"
                         child_item.setText(6, pos_pnl_text)
                         
-                        # 設定顏色
-                        if pos_pnl > 0:
+                        # 設定顏色：跟畫面上括號顯示的百分比一致
+                        if pos_pnl_percent > 0:
                             child_item.setForeground(6, Qt.darkGreen)
-                        elif pos_pnl < 0:
+                        elif pos_pnl_percent < 0:
                             child_item.setForeground(6, Qt.darkRed)
                     
                 if asset.asset_type != AssetType.METAL:
@@ -1710,9 +1710,9 @@ class MainWindow(QMainWindow):
                                     pnl_percent = 0.0
                                 pnl_text = f"{sym} {pnl:.2f} ({pnl_percent:+.2f}%)"
 
-                                if pnl > 0:
+                                if pnl_percent > 0:
                                     child_item.setForeground(6, Qt.darkGreen)
-                                elif pnl < 0:
+                                elif pnl_percent < 0:
                                     child_item.setForeground(6, Qt.darkRed)
                             else:
                                 pnl = float(self.portfolio_manager.realized_pnl_by_transaction_id.get(t.id, 0.0))
@@ -1720,9 +1720,9 @@ class MainWindow(QMainWindow):
                                 pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
                                 pnl_text = f"{sym} {pnl:.2f} ({pnl_percent:+.2f}%)"
 
-                                if pnl > 0:
+                                if pnl_percent > 0:
                                     child_item.setForeground(6, Qt.darkGreen)
-                                elif pnl < 0:
+                                elif pnl_percent < 0:
                                     child_item.setForeground(6, Qt.darkRed)
 
                             child_item.setText(6, pnl_text)

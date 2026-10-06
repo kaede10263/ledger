@@ -417,8 +417,7 @@ class PortfolioManager:
             for row in existing_snapshots
             if float(row.get("total_value_twd", 0.0) or 0.0) <= 0.0
         }
-        if schema_version != "3":
-            existing -= invalid_dates
+        existing -= invalid_dates
         missing_dates = [
             first_tx_date + timedelta(days=i)
             for i in range((today - first_tx_date).days + 1)
@@ -428,6 +427,8 @@ class PortfolioManager:
         if not missing_dates:
             return
 
+        first_missing_date = min(missing_dates)
+        last_valid_values = self._latest_valid_snapshot_values(existing_snapshots, before_date=first_missing_date)
         price_cache: Dict[tuple[str, AssetType, date_type], Optional[float]] = {}
         fx_cache: Dict[tuple[str, date_type], float] = {}
         max_dates = len(missing_dates)
@@ -437,6 +438,12 @@ class PortfolioManager:
             values = self._calculate_snapshot_values(
                 snapshot_date, price_cache=price_cache, fx_cache=fx_cache
             )
+            if values["total_value_twd"] <= 0.0:
+                if last_valid_values is None:
+                    continue
+                values = dict(last_valid_values)
+            else:
+                last_valid_values = dict(values)
             self.db_manager.save_daily_asset_snapshot(
                 snapshot_date,
                 values["total_value_twd"],
@@ -448,6 +455,32 @@ class PortfolioManager:
                 values["metal_value_twd"],
             )
         self.db_manager.set_setting("daily_asset_snapshots_version", "3")
+
+    def _latest_valid_snapshot_values(
+        self, snapshots: List[Dict[str, float]], before_date: Optional[date_type] = None
+    ) -> Optional[Dict[str, float]]:
+        """取得最後一筆有效快照，供報價缺值日延用，避免趨勢圖被寫成 0。"""
+        value_keys = [
+            "total_value_twd",
+            "tw_stock_value_twd",
+            "us_stock_value_twd",
+            "hk_stock_value_twd",
+            "fund_value_twd",
+            "crypto_value_twd",
+            "metal_value_twd",
+        ]
+        for row in reversed(snapshots):
+            if before_date is not None:
+                try:
+                    row_date = date_type.fromisoformat(str(row.get("date")))
+                except ValueError:
+                    continue
+                if row_date >= before_date:
+                    continue
+            if float(row.get("total_value_twd", 0.0) or 0.0) <= 0.0:
+                continue
+            return {key: float(row.get(key, 0.0) or 0.0) for key in value_keys}
+        return None
 
     def _calculate_snapshot_values(
         self,
