@@ -1564,7 +1564,7 @@ class MainWindow(QMainWindow):
                 main_item.setData(0, Qt.UserRole, asset)
                 
                 # 子項目：
-                # - 金屬：用持倉 lot（positions）
+                # - 金屬：先用持倉 lot（positions）顯示未賣出部位，再補上 SELL 已實現交易
                 # - 其他：用交易清單（BUY/SELL），確保像 7822 這種「買入 1 筆 + 賣出多筆」也能展開看到多行
                 if asset.asset_type == AssetType.METAL and len(asset.positions) > 0:
                     for position in asset.positions:
@@ -1644,88 +1644,99 @@ class MainWindow(QMainWindow):
                         elif pos_pnl_percent < 0:
                             child_item.setForeground(6, Qt.darkRed)
                     
-                if asset.asset_type != AssetType.METAL:
-                    txs = [
-                        t for t in self.portfolio_manager.transactions
-                        if t.symbol == asset.symbol and t.asset_type == asset.asset_type
-                    ]
-                    if txs:
+                txs = [
+                    t for t in self.portfolio_manager.transactions
+                    if t.symbol == asset.symbol and t.asset_type == asset.asset_type
+                ]
+                if asset.asset_type == AssetType.METAL:
+                    txs = [t for t in txs if t.transaction_type == TransactionType.SELL]
+
+                if txs:
+                    if asset.asset_type == AssetType.METAL:
+                        cur = "TWD"
+                    else:
                         cur = self.portfolio_manager._get_asset_currency(asset)
-                        sym = self._currency_symbol(cur)
-                        def _tx_display_sort_key(t):
-                            # 最新日期在上方；同一天固定 BUY 在 SELL 上方
-                            dt = self.portfolio_manager._normalize_tx_date(t.date)
-                            ts = dt.timestamp()
-                            type_order = 0 if t.transaction_type == TransactionType.BUY else 1
-                            return (-ts, type_order, str(t.id))
+                    sym = self._currency_symbol(cur)
+                    def _tx_display_sort_key(t):
+                        # 最新日期在上方；同一天固定 BUY 在 SELL 上方
+                        dt = self.portfolio_manager._normalize_tx_date(t.date)
+                        ts = dt.timestamp()
+                        type_order = 0 if t.transaction_type == TransactionType.BUY else 1
+                        return (-ts, type_order, str(t.id))
 
-                        txs_sorted = sorted(txs, key=_tx_display_sort_key)
-                        
-                        for t in txs_sorted:
-                            child_item = QTreeWidgetItem(main_item)
-                            child_item.setText(0, "")  # 代號留空
-                            child_item.setText(1, f"{t.transaction_type.value}日期: {t.date.strftime('%Y-%m-%d')}")
-                            
-                            # 數量：展開清單要顯示原始每筆交易數量
-                            if unit == "股":
-                                qty_text = f"{t.quantity:.0f} {unit}"
-                            else:
-                                qty_text = f"{t.quantity:.2f} {unit}"
-                            child_item.setText(2, qty_text)
-                            
-                            fee = t.fee or 0.0
-                            eff_price = t.price
-                            if t.quantity and t.quantity > 0:
-                                if t.transaction_type == TransactionType.BUY:
-                                    eff_price = t.price + (fee / t.quantity)
-                                elif t.transaction_type == TransactionType.SELL:
-                                    eff_price = t.price - (fee / t.quantity)
-                            
-                            # 成交（含/扣手續費）均價/單價
-                            child_item.setText(3, f"{sym} {eff_price:.2f}")
-                            
-                            # 參考：顯示目前價格；市值（index=5）：
-                            # - BUY：用「目前價格 * 原始買入數量」（符合你截圖）
-                            # - SELL：已了結，顯示 '-'
-                            if display_current_price and display_current_price > 0:
-                                child_item.setText(4, f"{sym} {display_current_price:.2f}")
-                                if t.transaction_type == TransactionType.BUY:
-                                    child_item.setText(5, f"{sym} {t.quantity * display_current_price:,.2f}")
-                                else:
-                                    child_item.setText(5, "-")
-                            else:
-                                child_item.setText(4, "N/A")
-                                child_item.setText(5, "-")
-                            
-                            # 損益規則（符合你描述）：
-                            # - BUY：用「目前市值（目前價格*買入數量）」-「買入成本基礎（含手續費）」
-                            # - SELL：用 FIFO 計算出的已實現損益
+                    txs_sorted = sorted(txs, key=_tx_display_sort_key)
+
+                    for t in txs_sorted:
+                        child_item = QTreeWidgetItem(main_item)
+                        child_item.setText(0, "")  # 代號留空
+                        child_item.setText(1, f"{t.transaction_type.value}日期: {t.date.strftime('%Y-%m-%d')}")
+
+                        # 數量：展開清單要顯示原始每筆交易數量
+                        if asset.asset_type == AssetType.METAL:
+                            tx_unit = t.unit or unit
+                            qty_text = f"{t.quantity:.2f} {tx_unit}"
+                        elif unit == "股":
+                            qty_text = f"{t.quantity:.0f} {unit}"
+                        else:
+                            qty_text = f"{t.quantity:.2f} {unit}"
+                        child_item.setText(2, qty_text)
+
+                        fee = t.fee or 0.0
+                        eff_price = t.price
+                        if t.quantity and t.quantity > 0:
                             if t.transaction_type == TransactionType.BUY:
-                                if display_current_price and display_current_price > 0 and t.quantity > 0:
-                                    buy_cost_basis = t.quantity * eff_price  # eff_price 含手續費（BUY）
-                                    pnl = t.quantity * display_current_price - buy_cost_basis
-                                    pnl_percent = (pnl / buy_cost_basis * 100) if buy_cost_basis > 0 else 0.0
-                                else:
-                                    pnl = 0.0
-                                    pnl_percent = 0.0
-                                pnl_text = f"{sym} {pnl:.2f} ({pnl_percent:+.2f}%)"
+                                eff_price = t.price + (fee / t.quantity)
+                            elif t.transaction_type == TransactionType.SELL:
+                                eff_price = t.price - (fee / t.quantity)
 
-                                if pnl_percent > 0:
-                                    child_item.setForeground(6, Qt.darkGreen)
-                                elif pnl_percent < 0:
-                                    child_item.setForeground(6, Qt.darkRed)
+                        # 成交（含/扣手續費）均價/單價
+                        child_item.setText(3, f"{sym} {eff_price:.2f}")
+
+                        # 參考：顯示目前價格；市值（index=5）：
+                        # - BUY：用「目前價格 * 原始買入數量」（符合你截圖）
+                        # - SELL：已了結，顯示 '-'
+                        if asset.asset_type == AssetType.METAL:
+                            child_item.setText(4, f"NT$ {display_current_price:.2f}/{unit}" if display_current_price > 0 else "N/A")
+                            child_item.setText(5, "-")
+                        elif display_current_price and display_current_price > 0:
+                            child_item.setText(4, f"{sym} {display_current_price:.2f}")
+                            if t.transaction_type == TransactionType.BUY:
+                                child_item.setText(5, f"{sym} {t.quantity * display_current_price:,.2f}")
                             else:
-                                pnl = float(self.portfolio_manager.realized_pnl_by_transaction_id.get(t.id, 0.0))
-                                cost_basis = float(self.portfolio_manager.realized_cost_basis_by_transaction_id.get(t.id, 0.0))
-                                pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
-                                pnl_text = f"{sym} {pnl:.2f} ({pnl_percent:+.2f}%)"
+                                child_item.setText(5, "-")
+                        else:
+                            child_item.setText(4, "N/A")
+                            child_item.setText(5, "-")
 
-                                if pnl_percent > 0:
-                                    child_item.setForeground(6, Qt.darkGreen)
-                                elif pnl_percent < 0:
-                                    child_item.setForeground(6, Qt.darkRed)
+                        # 損益規則（符合你描述）：
+                        # - BUY：用「目前市值（目前價格*買入數量）」-「買入成本基礎（含手續費）」
+                        # - SELL：用 FIFO 計算出的已實現損益
+                        if t.transaction_type == TransactionType.BUY:
+                            if display_current_price and display_current_price > 0 and t.quantity > 0:
+                                buy_cost_basis = t.quantity * eff_price  # eff_price 含手續費（BUY）
+                                pnl = t.quantity * display_current_price - buy_cost_basis
+                                pnl_percent = (pnl / buy_cost_basis * 100) if buy_cost_basis > 0 else 0.0
+                            else:
+                                pnl = 0.0
+                                pnl_percent = 0.0
+                            pnl_text = f"{sym} {pnl:.2f} ({pnl_percent:+.2f}%)"
 
-                            child_item.setText(6, pnl_text)
+                            if pnl_percent > 0:
+                                child_item.setForeground(6, Qt.darkGreen)
+                            elif pnl_percent < 0:
+                                child_item.setForeground(6, Qt.darkRed)
+                        else:
+                            pnl = float(self.portfolio_manager.realized_pnl_by_transaction_id.get(t.id, 0.0))
+                            cost_basis = float(self.portfolio_manager.realized_cost_basis_by_transaction_id.get(t.id, 0.0))
+                            pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
+                            pnl_text = f"{sym} {pnl:.2f} ({pnl_percent:+.2f}%)"
+
+                            if pnl_percent > 0:
+                                child_item.setForeground(6, Qt.darkGreen)
+                            elif pnl_percent < 0:
+                                child_item.setForeground(6, Qt.darkRed)
+
+                        child_item.setText(6, pnl_text)
 
             # 更新統計資訊
             self._update_type_stats(section.stats_label, asset_type)
